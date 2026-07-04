@@ -1,1 +1,190 @@
+import cv2
+import numpy as np
+import os
+# Ask user for the file path and strip whitespace AND quotation marks
+input_path = input("Enter the image path: ").strip().strip('"')
 
+# Loading image
+if not os.path.exists(input_path):
+    raise FileNotFoundError(f"Image not found: {input_path}")
+
+with open(input_path, "rb") as f:  
+    raw_data = np.frombuffer(f.read(), np.uint8) 
+
+# Decode image
+decoded_img = cv2.imdecode(raw_data, cv2.IMREAD_COLOR)
+if decoded_img is None:
+    raise ValueError(f"Failed to load image: {input_path}")
+ 
+# Preprocessing 
+target_dims = (400, 400)
+total_pixels = target_dims[0] * target_dims[1]
+resized_img = cv2.resize(decoded_img, target_dims)
+hsv_img = cv2.cvtColor(resized_img, cv2.COLOR_BGR2HSV)
+
+# Color masks
+low_red = cv2.inRange(hsv_img, (0, 50, 50), (10, 255, 255))
+high_red = cv2.inRange(hsv_img, (160, 50, 50), (180, 255, 255))
+full_red = cv2.bitwise_or(low_red, high_red)
+red_coverage = cv2.countNonZero(full_red) / total_pixels
+
+blue_mask = cv2.inRange(hsv_img, (100, 100, 50), (130, 255, 255))
+blue_coverage = cv2.countNonZero(blue_mask) / total_pixels
+
+# Shape detection
+gray_img = cv2.cvtColor(resized_img, cv2.COLOR_BGR2GRAY)
+blurred_img = cv2.GaussianBlur(gray_img, (5, 5), 0)
+edges = cv2.Canny(blurred_img, 50, 150)
+contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+primary_shape = None
+tri_contours, rect_contours = [], []
+is_direction_guide = False 
+
+for cnt in contours:
+    if cv2.contourArea(cnt) < 1000:
+        continue
+
+    poly_approx = cv2.approxPolyDP(cnt, 0.04 * cv2.arcLength(cnt, True), True)
+    num_sides = len(poly_approx)
+
+    if num_sides == 3:
+        tri_contours.append(cnt)
+    elif num_sides == 4:
+        rect_contours.append(cnt)
+    elif num_sides >= 8:
+        primary_shape = "circle"
+    elif num_sides == 5:
+        is_direction_guide = True
+        break  
+
+# Decision logic 
+if is_direction_guide:
+    print("Sign type: Direction guide")  
+elif primary_shape == "circle" and red_coverage > 0.10:
+    print("Sign type: Prohibitory")  
+elif tri_contours and red_coverage > 0.05:
+    print("Sign type: Warning")  
+elif rect_contours and blue_coverage > 0.05:
+    print("Sign type: Informational")  
+else:
+    print("Sign type: Unknown")  
+# Get input and output paths from user
+input_image_path = input("Enter the path to the input image: ").strip().strip('"')
+output_directory = input("Enter the output directory path: ").strip().strip('"')
+
+# Read the input image
+original_image = cv2.imread(input_image_path)
+if original_image is None:
+    raise ValueError(f"Cannot read image from '{input_image_path}'.")
+
+# Get image dimensions
+image_height, image_width = original_image.shape[:2]
+
+# Preprocess the image for contour detection
+gray_image = cv2.cvtColor(original_image, cv2.COLOR_BGR2GRAY)
+blurred_image = cv2.GaussianBlur(gray_image, (5, 5), 0)
+edges = cv2.Canny(blurred_image, 50, 150)
+
+# Find contours in the edged image
+contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+classified_signs = {}
+
+# Process each contour (potential sign region)
+for contour in contours:
+    contour_area = cv2.contourArea(contour)
+    if contour_area < 1000:  
+        continue
+    
+    # Get bounding box coordinates
+    x_coord, y_coord, box_width, box_height = cv2.boundingRect(contour)
+    
+    # Skip invalid bounding boxes
+    if (x_coord < 0 or y_coord < 0 or 
+        x_coord + box_width > image_width or 
+        y_coord + box_height > image_height):
+        continue
+
+    # Extract the region of interest
+    roi = original_image[y_coord:y_coord+box_height, x_coord:x_coord+box_width]
+    if roi is None or roi.size == 0:
+        continue
+
+    # Classify the sign type for this region
+    try:
+        roi_height, roi_width = roi.shape[:2]
+        if roi_height < 50 or roi_width < 50:
+            sign_type = "Unknown"
+        else:
+            # Convert to HSV for color detection
+            hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+            
+            # Define color ranges for red (two ranges for red in HSV)
+            red_lower1 = np.array([0, 50, 50])
+            red_upper1 = np.array([10, 255, 255])
+            red_lower2 = np.array([160, 50, 50])
+            red_upper2 = np.array([180, 255, 255])
+            
+            # Create masks for red and blue colors
+            red_mask1 = cv2.inRange(hsv_roi, red_lower1, red_upper1)
+            red_mask2 = cv2.inRange(hsv_roi, red_lower2, red_upper2)
+            red_mask = cv2.bitwise_or(red_mask1, red_mask2)
+            
+            blue_lower = np.array([100, 100, 50])
+            blue_upper = np.array([130, 255, 255])
+            blue_mask = cv2.inRange(hsv_roi, blue_lower, blue_upper)
+            
+            # Calculate color ratios
+            red_ratio = cv2.countNonZero(red_mask) / (roi_height * roi_width)
+            blue_ratio = cv2.countNonZero(blue_mask) / (roi_height * roi_width)
+            
+            # Shape analysis using contours
+            gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+            blurred_roi = cv2.GaussianBlur(gray_roi, (5, 5), 0)
+            roi_edges = cv2.Canny(blurred_roi, 50, 150)
+            roi_contours, _ = cv2.findContours(roi_edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            sign_type = "Unknown"
+            for roi_contour in roi_contours:
+                roi_contour_area = cv2.contourArea(roi_contour)
+                if roi_contour_area < 300:
+                    continue
+                
+                # Approximate the contour to determine shape
+                epsilon = 0.04 * cv2.arcLength(roi_contour, True)
+                approx = cv2.approxPolyDP(roi_contour, epsilon, True)
+                num_sides = len(approx)
+                
+                # Classify based on shape and color
+                if num_sides == 3 and red_ratio > 0.2 or num_sides >= 8 or (red_ratio > 0.1 and num_sides != 3 and num_sides != 5):
+                    sign_type = "Warningyu"
+                    break
+                elif num_sides == 5:
+                    sign_type = "Directional"
+                    break
+                elif :
+                    sign_type = "Prohibitory"
+                    break
+                elif num_sides == 4 and blue_ratio > 0.05:
+                    sign_type = "Informative"
+                    break
+                    
+    except Exception as error:
+        print(f"Error processing sign at ({x_coord},{y_coord}): {error}")
+        sign_type = "Unknown"
+
+    # Add the detected sign to the appropriate category
+    if sign_type not in classified_signs:
+        classified_signs[sign_type] = np.full_like(original_image, fill_value=255)  # White background
+    
+    classified_signs[sign_type][y_coord:y_coord+box_height, x_coord:x_coord+box_width] = roi
+
+# Save results
+os.makedirs(output_directory, exist_ok=True)
+for sign_type, output_image in classified_signs.items():
+    filename = os.path.join(output_directory, f"{sign_type}.jpg")
+    cv2.imwrite(filename, output_image)
+    print(f"Saved '{sign_type}' sign image to {filename}")
+
+print("Processing complete!")
